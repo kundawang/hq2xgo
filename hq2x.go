@@ -20,16 +20,20 @@ const (
 	BOTTOM_RIGHT
 )
 
-var (
-	contextFlag [9]uint8
-)
+// contextFlag maps each position in the 3x3 neighborhood to its bit in the
+// HQ2x pattern. The center is skipped. Initializing it as a literal keeps
+// HQ2x safe for concurrent use (the pattern table is read-only).
+var contextFlag = [9]uint8{1, 2, 4, 8, 0, 16, 32, 64, 128}
 
 // HQ2x - Enlarge image by 2x with hq2x algorithm
 func HQ2x(src *image.RGBA) (*image.RGBA, error) {
-	initContextFlag()
 	srcX, srcY := src.Bounds().Dx(), src.Bounds().Dy()
 
-	dest := image.NewRGBA(image.Rect(0, 0, srcX*2, srcY*2))
+	destW, destH, err := scaledSize(int64(srcX), int64(srcY), 2)
+	if err != nil {
+		return nil, err
+	}
+	dest := image.NewRGBA(image.Rect(0, 0, destW, destH))
 
 	columns := make(chan int, srcX)
 	for x := 0; x < srcX; x++ {
@@ -47,6 +51,23 @@ func HQ2x(src *image.RGBA) (*image.RGBA, error) {
 	return dest, nil
 }
 
+// scaledSize returns size*scale after checking that the result fits in an int
+// and that allocating an RGBA image of that size is sane.
+func scaledSize(w, h, scale int64) (int, int, error) {
+	dw, dh := w*scale, h*scale
+	if w < 0 || h < 0 || scale <= 0 || dw < 0 || dh < 0 {
+		return 0, 0, fmt.Errorf("%w: invalid size %dx%d", ErrImageTooLarge, w, h)
+	}
+	// Guard against both integer overflow and absurd allocations.
+	if w != 0 && dw/w != scale || h != 0 && dh/h != scale {
+		return 0, 0, fmt.Errorf("%w: size overflow %dx%d", ErrImageTooLarge, w, h)
+	}
+	if dw != 0 && dh > int64(maxInt)/dw/4 {
+		return 0, 0, fmt.Errorf("%w: %dx%d", ErrImageTooLarge, dw, dh)
+	}
+	return int(dw), int(dh), nil
+}
+
 func worker(id int, src, dest *image.RGBA, columns chan int, wg *sync.WaitGroup) {
 	for column := range columns {
 		hq2xColumn(src, dest, column)
@@ -54,7 +75,7 @@ func worker(id int, src, dest *image.RGBA, columns chan int, wg *sync.WaitGroup)
 	}
 }
 
-// Apply HQ2x for column x
+// Apply HQ2x for column x (relative to the source's Bounds().Min)
 func hq2xColumn(src, dest *image.RGBA, x int) {
 	srcY := src.Bounds().Dy()
 	for y := 0; y < srcY; y++ {
@@ -67,8 +88,13 @@ func hq2xColumn(src, dest *image.RGBA, x int) {
 	}
 }
 
+// getPixel returns the pixel at (x, y), where coordinates are relative to the
+// source's Bounds().Min. Out-of-range coordinates are clamped to the edges so
+// that border pixels sample the nearest real pixel instead of reading outside
+// the image (which would panic for sub-images with a non-zero origin).
 func getPixel(src *image.RGBA, x, y int) color.RGBA {
-	width, height := src.Bounds().Dx(), src.Bounds().Dy()
+	b := src.Bounds()
+	width, height := b.Dx(), b.Dy()
 
 	if x < 0 {
 		x = 0
@@ -82,7 +108,7 @@ func getPixel(src *image.RGBA, x, y int) color.RGBA {
 		y = height - 1
 	}
 
-	return src.RGBAAt(x, y)
+	return src.RGBAAt(b.Min.X+x, b.Min.Y+y)
 }
 
 func hq2xPixel(src *image.RGBA, x, y int) (tl, tr, bl, br color.RGBA) {
@@ -92,6 +118,14 @@ func hq2xPixel(src *image.RGBA, x, y int) (tl, tr, bl, br color.RGBA) {
 		getPixel(src, x-1, y+1), getPixel(src, x, y+1), getPixel(src, x+1, y+1),
 	}
 
+	return hq2xContext(context)
+}
+
+// hq2xContext applies the HQ2x rules to a fully resolved 3x3 neighborhood.
+// The four returned pixels are the top-left, top-right, bottom-left and
+// bottom-right replacements for the center pixel. Alpha is not set here;
+// callers decide how to propagate it.
+func hq2xContext(context [9]color.RGBA) (tl, tr, bl, br color.RGBA) {
 	yuvContext := [9]color.YCbCr{}
 	yuvPixel := rgbaToYCbCr(context[CENTER])
 	for i := 0; i < 9; i++ {
@@ -1850,19 +1884,6 @@ func equalYuv(a color.YCbCr, b color.YCbCr) bool {
 	}
 
 	return true
-}
-
-func initContextFlag() {
-	curFlag := uint8(1)
-
-	for i := 0; i < 9; i++ {
-		if i == CENTER {
-			continue
-		}
-
-		contextFlag[i] = curFlag
-		curFlag = curFlag << 1
-	}
 }
 
 func rgbaToYCbCr(c color.RGBA) color.YCbCr {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"os"
+	"path/filepath"
 	"testing"
 
 	hq2x "github.com/pokemium/hq2xgo"
@@ -36,5 +37,26 @@ func BenchmarkRun(b *testing.B) {
 		if err != nil {
 			panic(err)
 		}
+	}
+}
+
+func TestGridCLIRejectsZeroCellWidth(t *testing.T) {
+	if err := doHQ2xGrid("../example/1/demo.png", "out.png", 0, 4, 0); err == nil {
+		t.Fatal("expected an error for a non-positive cell width")
+	}
+}
+
+func TestGridCLIWritesDoubledSheet(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "out.png")
+	if err := doHQ2xGrid("../example/1/demo.png", out, 16, 0, 0); err != nil {
+		t.Fatalf("doHQ2xGrid: %v", err)
+	}
+	got, err := getImage(out)
+	if err != nil {
+		t.Fatalf("getImage: %v", err)
+	}
+	if want := image.Rect(0, 0, 320, 288); got.Bounds() != want {
+		t.Fatalf("bounds = %v, want %v", got.Bounds(), want)
 	}
 }

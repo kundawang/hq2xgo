@@ -4,9 +4,9 @@ import (
 	"flag"
 	"fmt"
 	"image"
+	"image/draw"
 	"os"
 	"path/filepath"
-	"image/draw"
 
 	hq2x "github.com/pokemium/hq2xgo"
 
@@ -21,6 +21,9 @@ func main() {
 
 // Run - run app
 func Run() int {
+	cellW := flag.Int("cell", 0, "sprite grid cell width in pixels (enables grid mode)")
+	cellH := flag.Int("cell-height", 0, "sprite grid cell height; defaults to -cell")
+	margin := flag.Int("margin", 0, "transparent border around the sprite grid in pixels")
 	flag.Parse()
 
 	input := flag.Arg(0)
@@ -35,7 +38,13 @@ func Run() int {
 		output = base + "_hq2x" + ext
 	}
 
-	if err := doHQ2x(input, output); err != nil {
+	var err error
+	if *cellW != 0 || *cellH != 0 || *margin != 0 {
+		err = doHQ2xGrid(input, output, *cellW, *cellH, *margin)
+	} else {
+		err = doHQ2x(input, output)
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
@@ -61,6 +70,9 @@ func doHQ2x(input, output string) error {
 	}
 
 	after, err := hq2x.HQ2x(b)
+	if err != nil {
+		return err
+	}
 
 	if err := saveImage(output, after); err != nil {
 		return err
@@ -69,8 +81,42 @@ func doHQ2x(input, output string) error {
 	return nil
 }
 
+// doHQ2xGrid enlarges each sprite grid cell independently. A zero cellHeight
+// means "square cells" (equal to cellWidth).
+func doHQ2xGrid(input, output string, cellW, cellH, margin int) error {
+	if cellW <= 0 {
+		return fmt.Errorf("-cell must be a positive width in grid mode, got %d", cellW)
+	}
+	if cellH == 0 {
+		cellH = cellW
+	}
+
+	before, err := openImage(input)
+	if err != nil {
+		return err
+	}
+
+	b, ok := before.(*image.RGBA)
+	if !ok {
+		b = imageToRGBA(before)
+	}
+
+	after, err := hq2x.HQ2xGrid(b, cellW, cellH, margin)
+	if err != nil {
+		return err
+	}
+
+	return saveImage(output, after)
+}
+
 func help() {
 	fmt.Println("hq2x <input> [<output>]")
+	fmt.Println()
+	fmt.Println("Single image:")
+	fmt.Println("  hq2x input.png output.png")
+	fmt.Println()
+	fmt.Println("Sprite sheet (each cell scaled independently):")
+	fmt.Println("  hq2x -cell 16 [-cell-height 24] [-margin 1] sheet.png output.png")
 }
 
 func getFileNameWithoutExt(path string) (filename string, ext string) {
